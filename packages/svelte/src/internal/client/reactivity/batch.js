@@ -183,6 +183,14 @@ export let legacy_updates = null;
 
 var flush_count = 0;
 
+/**
+ * The writes made during the flush that is currently in progress, in the order they were made,
+ * so that `flush_queued_effects` can read back the writes of a single effect instead of scanning
+ * every write in the batch (see https://github.com/sveltejs/svelte/issues/19392)
+ * @type {Array<[Batch, Value, BatchValue]> | null}
+ */
+var write_log = null;
+
 /** Sources whose DEV update counts and stack traces need resetting after the flush. @type {Set<Value>} */
 export const source_stacks = new Set();
 
@@ -518,8 +526,19 @@ export class Batch {
 		/** @type {Batch | null} */
 		var batch = this;
 
-		while (batch !== null) {
-			batch = batch.#process_step();
+		// Writes made while flushing are appended to `write_log`, so that `flush_queued_effects` can
+		// look at the writes of a single effect instead of scanning every write in the batch
+		// (see https://github.com/sveltejs/svelte/issues/19392). A nested flush shares the log of
+		// the flush that started it, so its entries stay at the indices the outer cursors expect
+		var outermost = write_log === null;
+		if (outermost) write_log = [];
+
+		try {
+			while (batch !== null) {
+				batch = batch.#process_step();
+			}
+		} finally {
+			if (outermost) write_log = null;
 		}
 	}
 
@@ -874,6 +893,7 @@ export class Batch {
 			}
 
 			this.current.set(source, entry);
+			write_log?.push([this, source, entry]);
 		}
 
 		for (const [effect, deferred] of batch.async_deriveds) {
@@ -1011,6 +1031,9 @@ export class Batch {
 
 		this.current.set(source, entry);
 
+		// Keep the flush's ordered record of writes in sync (see `flush_queued_effects`)
+		write_log?.push([this, source, entry]);
+
 		// The active view of the world sees writes made while it's active, even if they don't belong to the batch whose
 		// view it is — e.g. those of effects that run while a batch commits, which go to a new batch. (Async results
 		// are only captured while no view is active, see `async_derived`)
@@ -1113,6 +1136,7 @@ export class Batch {
 					if (is_earlier && entry.v !== own.v && !own.async) {
 						// bring the value up to date
 						batch.current.set(source, entry);
+						write_log?.push([batch, source, entry]);
 					} else {
 						// same value, later batch has more recent value, or the batch's own result
 						// of an async expression — no need to re-run these effects
@@ -1707,6 +1731,9 @@ function flush_queued_effects(effects, earlier_writes = null) {
 			eager_block_effects = new Set();
 
 			var version = write_version;
+			// only writes from this point on can belong to this effect (`write_log` is append-only
+			// during a flush, so a mark is enough to find them)
+			var log_length = write_log === null ? 0 : write_log.length;
 			update_effect(effect);
 
 			// Effects with no dependencies or teardown do not get added to the effect tree.
@@ -1774,9 +1801,26 @@ function flush_queued_effects(effects, earlier_writes = null) {
 
 			// if the effect — or the block effects — wrote anything
 			if (write_version !== version && current_batch !== null) {
-				for (const [value, write] of current_batch.current) {
-					if (write.wv > version) {
-						(earlier_writes ??= new Map()).set(value, write);
+				if (write_log === null) {
+					for (const [value, write] of current_batch.current) {
+						if (write.wv > version) {
+							(earlier_writes ??= new Map()).set(value, write);
+						}
+					}
+				} else {
+					// reading back only what was written since this effect started keeps a flush with many
+					// writing effects linear, rather than rescanning every write in the batch for each of them
+					for (var log_index = log_length; log_index < write_log.length; log_index += 1) {
+						var logged = write_log[log_index];
+						// a source that was written again has a more recent entry in `current`, which is the one
+						// the previous scan would have seen
+						if (
+							logged[0] === current_batch &&
+							logged[2].wv > version &&
+							logged[0].current.get(logged[1]) === logged[2]
+						) {
+							(earlier_writes ??= new Map()).set(logged[1], logged[2]);
+						}
 					}
 				}
 			}
