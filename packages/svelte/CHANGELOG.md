@@ -1,5 +1,19 @@
 # svelte
 
+## 5.59.2
+
+### Patch Changes
+
+- perf: process successive batches iteratively instead of recursively, avoiding slow stack capture in dev ([#19391](https://github.com/sveltejs/svelte/pull/19391))
+
+- fix: use comments instead of text for custom renderers ([#19376](https://github.com/sveltejs/svelte/pull/19376))
+
+- fix: keep the comments around a parenthesized template expression in its `leadingComments` and `trailingComments` ([#19389](https://github.com/sveltejs/svelte/pull/19389))
+
+- fix: escape comment terminators in all commented-out CSS ([#19380](https://github.com/sveltejs/svelte/pull/19380))
+
+- fix: ignore commas in comments when removing unused CSS selectors ([#19382](https://github.com/sveltejs/svelte/pull/19382))
+
 ## 5.59.1
 
 ### Patch Changes
